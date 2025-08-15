@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Play Plan Suggest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --c-bg:#f5f7fa; --c-card:#fff; --c-accent:#2563eb; --c-accent-hover:#1d4ed8; --c-text:#1e293b; --c-border:#e2e8f0; --c-warn:#dc2626; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:'Inter', system-ui, sans-serif; background:var(--c-bg); color:var(--c-text); -webkit-font-smoothing:antialiased; }
+    h1 { font-size:1.25rem; margin:0 0 1rem; }
+    .layout { max-width:720px; margin:0 auto; padding:1rem 1rem 3rem; }
+    .form { background:var(--c-card); border:1px solid var(--c-border); padding:1rem 1.25rem 1.5rem; border-radius:12px; box-shadow:0 2px 4px rgba(0,0,0,.04); }
+    .form__row { display:flex; flex-direction:column; margin-bottom:0.9rem; }
+    .form__row--inline { flex-direction:row; gap:.75rem; }
+    label { font-size:.78rem; font-weight:600; letter-spacing:.5px; text-transform:uppercase; margin-bottom:.25rem; }
+    input[type=text], input[type=number], select, textarea { width:100%; border:1px solid var(--c-border); background:#fff; border-radius:8px; font:inherit; padding:.65rem .75rem; line-height:1.3; }
+    textarea { resize:vertical; min-height:72px; }
+    input:focus, select:focus, textarea:focus { outline:2px solid var(--c-accent); outline-offset:1px; }
+    .form__actions { display:flex; gap:.75rem; flex-wrap:wrap; align-items:center; margin-top:.25rem; }
+    .btn { --_bg:var(--c-accent); --_bgH:var(--c-accent-hover); cursor:pointer; border:none; color:#fff; background:var(--_bg); padding:.75rem 1.2rem; border-radius:8px; font-weight:600; font-size:.9rem; letter-spacing:.3px; display:inline-flex; align-items:center; gap:.4rem; box-shadow:0 1px 2px rgba(0,0,0,.15); transition:background .18s, transform .15s; }
+    .btn:hover { background:var(--_bgH); }
+    .btn:active { transform:translateY(1px); }
+    .btn--ghost { --_bg:#334155; --_bgH:#1e293b; }
+    .badge { background:#e0f2fe; color:#0369a1; padding:0 .5rem; border-radius:999px; font-size:.65rem; font-weight:600; }
+    .cards { margin-top:1.25rem; display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); }
+    .card { background:var(--c-card); border:1px solid var(--c-border); border-radius:14px; padding:1rem .95rem 1.1rem; display:flex; flex-direction:column; position:relative; overflow:hidden; }
+    .card__title { font-size:.95rem; font-weight:600; margin:0 0 .5rem; line-height:1.25; }
+    .card__body { font-size:.78rem; line-height:1.45; white-space:pre-wrap; word-break:break-word; }
+    .card__meta { margin-top:auto; padding-top:.65rem; font-size:.65rem; display:flex; flex-wrap:wrap; gap:.4rem; }
+    .skeleton { position:relative; overflow:hidden; background:linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 37%,#e2e8f0 63%); background-size:400% 100%; animation:sk 1.3s ease-in-out infinite; border-radius:8px; min-height:72px; }
+    @keyframes sk {0%{background-position:100% 50%}100%{background-position:0 50%}}
+    .loading-indicator { font-size:.75rem; color:#334155; display:flex; align-items:center; gap:.5rem; }
+    .loading-indicator__spinner { width:14px; height:14px; border:2px solid #bfdbfe; border-top-color:var(--c-accent); border-radius:50%; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg);} }
+    .toast { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#1e293b; color:#fff; padding:.75rem 1rem; border-radius:10px; font-size:.75rem; box-shadow:0 4px 18px -4px rgba(0,0,0,.4); display:flex; gap:.5rem; align-items:center; max-width:80%; }
+    .toast--error { background:var(--c-warn); }
+    .hidden { display:none !important; }
+    .addr-fallback { display:none; }
+    .addr-fallback--show { display:block; }
+    .form__hint { font-size:.6rem; opacity:.7; margin-top:.15rem; }
+    @media (max-width:600px){ .form__row--inline { flex-direction:column; } }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <h1>Play Plan <span class="badge">beta</span></h1>
+    <form class="form" id="planForm" autocomplete="off">
+      <div class="form__row">
+        <label>気分 / キーワード</label>
+        <input type="text" name="mood" placeholder="例: まったり, 冒険, カフェ" />
+      </div>
+      <div class="form__row form__row--inline">
+        <div style="flex:1">
+          <label>移動半径 (km)</label>
+          <input type="number" name="radius_km" min="1" max="200" inputmode="numeric" placeholder="5" />
+        </div>
+        <div style="flex:1">
+          <label>予算 目安</label>
+            <input type="text" name="budget" placeholder="3000円" />
+        </div>
+        <div style="flex:1.2">
+          <label>屋内希望</label>
+          <select name="indoor">
+            <option value="">未指定</option>
+            <option value="true">はい</option>
+            <option value="false">いいえ</option>
+          </select>
+        </div>
+      </div>
+      <div class="form__row">
+        <label>現在地</label>
+        <div class="form__actions" style="margin:0;">
+          <button type="button" class="btn btn--ghost" id="btnLocate">位置情報取得</button>
+          <div id="geoStatus" class="loading-indicator hidden">
+            <div class="loading-indicator__spinner"></div>
+            <span>取得中...</span>
+          </div>
+        </div>
+        <div class="addr-fallback" id="addrFallback">
+          <div class="form__hint">位置情報が拒否されました。住所/駅名を入力し、地図アプリ等で緯度経度を取得して貼り付けてください。</div>
+          <div class="form__row form__row--inline" style="margin-top:.35rem;">
+            <div style="flex:1">
+              <label>緯度(lat)</label>
+              <input type="text" name="lat" placeholder="35.68" />
+            </div>
+            <div style="flex:1">
+              <label>経度(lon)</label>
+              <input type="text" name="lon" placeholder="139.76" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="form__actions">
+        <button type="submit" class="btn" id="btnSubmit">提案を生成</button>
+        <div id="globalLoading" class="loading-indicator hidden">
+          <div class="loading-indicator__spinner"></div><span>生成中...</span>
+        </div>
+      </div>
+    </form>
+
+    <div id="cards" class="cards" aria-live="polite"></div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="alert"></div>
+  <script src="app.js"></script>
+</body>
+</html>
