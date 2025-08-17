@@ -34,42 +34,92 @@
 
   function clearCards(){ cardsEl.innerHTML=''; }
 
-  function renderSuggestions(markdownText){
-    clearCards();
-    // 期待: Markdown番号付きリスト 1. ... 2. ... 3.
-    if(!markdownText){ showToast('結果が空です', true); return; }
-
-    // 安全化: scriptタグ等削除 (簡易) -> テキスト分割のみでinnerHTML使わず
-    var lines = markdownText.split(/\r?\n/);
-    var blocks=[]; var current=[];
-    for(var i=0;i<lines.length;i++){
-      var line = lines[i];
-      if(/^\s*\d+\./.test(line)){
-        if(current.length){ blocks.push(current.join('\n')); current=[]; }
-        current.push(line.replace(/^\s*\d+\.\s*/,'').trim());
-      } else if(line.trim().length){
-        current.push(line.trim());
-      }
+  function displaySuggestions(suggestions, fallbackHint) {
+    var cardsEl = document.getElementById('cards');
+    cardsEl.innerHTML = '';
+    if(fallbackHint) {
+      var notice = document.createElement('div');
+      notice.className = 'fallback-notice';
+      notice.style.cssText = 'background:#fef7cd;border:1px solid #f59e0b;padding:12px;margin-bottom:16px;border-radius:8px;color:#92400e;';
+      notice.textContent = fallbackHint;
+      cardsEl.appendChild(notice);
     }
-    if(current.length) blocks.push(current.join('\n'));
-    if(!blocks.length){ blocks=[markdownText]; }
-
-    blocks.slice(0,3).forEach(function(b,i){
-      var card=document.createElement('div');
-      card.className='card';
-      var title=document.createElement('h2');
-      title.className='card__title';
-      var linesB=b.split(/\n/);
-      title.textContent= (linesB[0]||('プラン '+(i+1)) ).substring(0,60);
-      var body=document.createElement('div');
-      body.className='card__body';
-      body.textContent = linesB.slice(1).join('\n').substring(0,500) || '詳細なし';
-      var meta=document.createElement('div');
-      meta.className='card__meta';
-      meta.textContent='提案#'+(i+1);
-      card.appendChild(title); card.appendChild(body); card.appendChild(meta);
+    
+    var blocks = suggestions.split(/(?=\d+\.)/);
+    blocks.forEach(function (b, i) {
+      if (!b.trim()) return;
+      var card = document.createElement('div');
+      card.className = 'card';
+      var title = document.createElement('h2');
+      title.className = 'card__title';
+      var linesB = b.split(/\n/);
+      title.textContent = (linesB[0] || ('プラン ' + (i + 1))).substring(0, 60);
+      var body = document.createElement('div');
+      body.className = 'card__body';
+      body.textContent = linesB.slice(1).join('\n').substring(0, 500) || '詳細なし';
+      var meta = document.createElement('div');
+      meta.className = 'card__meta';
+      meta.textContent = '提案#' + (i + 1);
+      card.appendChild(title);
+      card.appendChild(body);
+      card.appendChild(meta);
       cardsEl.appendChild(card);
     });
+  }
+
+  function displayCandidatesWithPlaces(candidates) {
+    if (!candidates || !candidates.length) return;
+    
+    var cardsEl = document.getElementById('cards');
+    var placesSection = document.createElement('div');
+    placesSection.className = 'places-section';
+    placesSection.style.cssText = 'margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;';
+    
+    var placesTitle = document.createElement('h3');
+    placesTitle.textContent = '🏪 近隣の具体的な場所';
+    placesTitle.style.cssText = 'margin:0 0 12px 0;color:#374151;';
+    placesSection.appendChild(placesTitle);
+    
+    candidates.forEach(function(candidate) {
+      if (!candidate.places || !candidate.places.length) return;
+      
+      var candidateDiv = document.createElement('div');
+      candidateDiv.style.cssText = 'margin-bottom:12px;';
+      
+      var candidateTitle = document.createElement('div');
+      candidateTitle.textContent = '📍 ' + candidate.name;
+      candidateTitle.style.cssText = 'font-weight:600;margin-bottom:6px;color:#1f2937;';
+      candidateDiv.appendChild(candidateTitle);
+      
+      candidate.places.forEach(function(place) {
+        var placeDiv = document.createElement('div');
+        placeDiv.style.cssText = 'margin-left:16px;margin-bottom:4px;display:flex;align-items:center;gap:8px;';
+        
+        var placeName = document.createElement('span');
+        placeName.textContent = place.name;
+        placeName.style.cssText = 'color:#374151;';
+        
+        var placeDistance = document.createElement('span');
+        placeDistance.textContent = '(' + place.distance_km + 'km)';
+        placeDistance.style.cssText = 'color:#6b7280;font-size:0.9em;';
+        
+        var placeLink = document.createElement('a');
+        placeLink.href = place.osm_url;
+        placeLink.target = '_blank';
+        placeLink.rel = 'noopener';
+        placeLink.textContent = '地図';
+        placeLink.style.cssText = 'color:#2563eb;text-decoration:underline;font-size:0.9em;';
+        
+        placeDiv.appendChild(placeName);
+        placeDiv.appendChild(placeDistance);
+        placeDiv.appendChild(placeLink);
+        candidateDiv.appendChild(placeDiv);
+      });
+      
+      placesSection.appendChild(candidateDiv);
+    });
+    
+    cardsEl.appendChild(placesSection);
   }
 
   function getNumber(v){ var n=parseFloat(v); return isNaN(n)?undefined:n; }
@@ -113,8 +163,23 @@
       return res.json();
     }).then(function(json){
       var text = json.suggestions || '';
-      renderSuggestions(text);
-      if(json.fallback){ 
+      var fallbackHint = null;
+      
+      if(json.fallback || json.degraded){ 
+        var reason = json.fallback_reason;
+        fallbackHint = 'AI生成ができないため、基本的な提案をお送りしました';
+        if(reason === 'timeout') fallbackHint = '処理時間の制限により、基本的な提案をお送りしました';
+        if(json.weather_error) fallbackHint += ' (天気データ取得エラー)';
+      }
+      
+      displaySuggestions(text, fallbackHint);
+      
+      // Display candidates with places if available
+      if(json.candidates && json.candidates.length > 0) {
+        displayCandidatesWithPlaces(json.candidates);
+      }
+      
+      if(json.fallback || json.degraded){ 
         var reason = json.fallback_reason;
         var msg = 'AI生成ができないため、基本的な提案をお送りしました';
         if(reason === 'timeout') msg = '処理時間の制限により、基本的な提案をお送りしました';
