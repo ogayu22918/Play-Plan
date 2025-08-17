@@ -1,6 +1,6 @@
 # app.py
 import os, math, json
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 import requests
 from google import genai
 from google.genai import types
@@ -45,8 +45,19 @@ def _bad_request(msg: str):
 
 @app.errorhandler(Exception)
 def _unhandled(e: Exception):  # PIIを含む可能性のある request.data はログしない
-    app.logger.exception("unhandled error: %s", e.__class__.__name__)
-    return jsonify({"error": "internal_error"}), 500
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        # 通常のHTTPエラーはそのまま (404 等)
+        return e
+    # 詳細なエラーログを出力（デバッグ用）
+    import traceback
+    app.logger.error("UNHANDLED EXCEPTION:")
+    app.logger.error("Type: %s", type(e).__name__)
+    app.logger.error("Message: %s", str(e))
+    app.logger.error("Traceback:\n%s", traceback.format_exc())
+    app.logger.error("Request URL: %s", request.url if request else 'N/A')
+    app.logger.error("Request method: %s", request.method if request else 'N/A')
+    return jsonify({"error": "internal_error", "debug": str(e)}), 500
 # https://ai.google.dev/gemini-api/docs/quickstart
 
 # 1) 起動時にアクティビティを読み込み＆埋め込みを用意（初回は計算して保存）
@@ -56,15 +67,12 @@ with open("activities_seed.json", "r", encoding="utf-8") as f:
 # 既存の埋め込みキャッシュがなければ作成
 if os.path.exists("embeddings.npy"):
     EMB = np.load("embeddings.npy").astype(np.float32, copy=False)
+    _emb_norms = np.linalg.norm(EMB, axis=1, keepdims=True) + 1e-9
+    EMB_UNIT = EMB / _emb_norms
 else:
-    texts = [f"{a['name']} {', '.join(a['tags'])}" for a in ACTIVITIES]
-    res = client.models.embed_content(model=EMBEDDING_MODEL, contents=texts)  # ai.google.dev embeddings
-    EMB = np.array([e.values for e in res.embeddings], dtype=np.float32)
-    np.save("embeddings.npy", EMB)
-
-# 行方向を単位ベクトル化（正確なコサイン類似度 = 内積でOK）
-_emb_norms = np.linalg.norm(EMB, axis=1, keepdims=True) + 1e-9
-EMB_UNIT = EMB / _emb_norms
+    # 初回起動時に Gemini API 利用不可 (キー未設定等) でもアプリを起動させたいので遅延生成
+    EMB = None  # type: ignore
+    EMB_UNIT = None  # type: ignore
 
 def cosine_sim(a, b): return np.dot(a, b) / (np.linalg.norm(a)*np.linalg.norm(b)+1e-9)
 
@@ -80,22 +88,40 @@ def shortlist_by_rules(weather, user):
     # 仕様: 雨/降水確率/屋内希望/暑さ/寒さ/強風/気分キーワードに応じタグを付与(重複排除)
     c = weather.get("current", {}) if isinstance(weather, dict) else {}
     hourly = weather.get("hourly", {}) if isinstance(weather, dict) else {}
-    precip = (c.get("precipitation") or 0) or 0
-    app_temp = (c.get("apparent_temperature") or 0) or 0
-    wind = (c.get("wind_speed_10m") or 0) or 0
-    precip_prob = (hourly.get("precipitation_probability") or 0) or 0
+    def _scalar(v):
+        if isinstance(v, list):
+            return v[0] if v else 0
+        return v
+    precip = (_scalar(c.get("precipitation")) or 0) or 0
+    app_temp = (_scalar(c.get("apparent_temperature")) or 0) or 0
+    wind = (_scalar(c.get("wind_speed_10m")) or 0) or 0
+    precip_prob_raw = hourly.get("precipitation_probability") if isinstance(hourly, dict) else 0
+    if isinstance(precip_prob_raw, list) and precip_prob_raw:
+        # 直近値(先頭)を使用。より堅牢にしたい場合は max(…)/平均なども可。
+        precip_prob = precip_prob_raw[0] or 0
+    else:
+        precip_prob = precip_prob_raw or 0
     mood = user.get("mood", "") if isinstance(user, dict) else ""
     want_indoor = bool(user.get("indoor")) if isinstance(user, dict) else False
 
     tags = []
-    indoor_trigger = precip > 0 or precip_prob >= 60 or want_indoor or wind >= 12
+    def _num(x):
+        try:
+            return float(x)
+        except Exception:
+            return 0.0
+    precip_f = _num(precip)
+    precip_prob_f = _num(precip_prob)
+    wind_f = _num(wind)
+    app_temp_f = _num(app_temp)
+    indoor_trigger = (precip_f > 0) or (precip_prob_f >= 60) or want_indoor or (wind_f >= 12)
     if indoor_trigger:
         tags += ["indoor", "museum", "cinema", "boardgame", "spa", "arcade"]
     # 暑さ (>=30)
-    if app_temp >= 30:
+    if app_temp_f >= 30:
         tags += ["aquarium", "mall"]
     # 寒さ (<=5) -> 追加で spa (重複しても後で集合化)
-    if app_temp <= 5:
+    if app_temp_f <= 5:
         tags += ["spa"]
     # 冒険/まったり 気分
     if "冒険" in mood:
@@ -103,6 +129,27 @@ def shortlist_by_rules(weather, user):
     if "まったり" in mood:
         tags += ["cafe", "bookstore"]
     return list(set(tags))
+
+def _ensure_embeddings():
+    """埋め込み行列がまだ無ければ作成。失敗時は False を返す。"""
+    global EMB, EMB_UNIT, client
+    if EMB is not None and EMB_UNIT is not None:
+        return True
+    if client is None:
+        return False
+    try:
+        texts = [f"{a['name']} {', '.join(a['tags'])}" for a in ACTIVITIES]
+        res = client.models.embed_content(model=EMBEDDING_MODEL, contents=texts)
+        EMB = np.array([e.values for e in res.embeddings], dtype=np.float32)
+        np.save("embeddings.npy", EMB)
+        _n = np.linalg.norm(EMB, axis=1, keepdims=True) + 1e-9
+        EMB_UNIT = EMB / _n
+        return True
+    except Exception as e:  # ログのみ、フォールバックへ
+        app.logger.warning("embed matrix init failed: %s", e.__class__.__name__)
+        EMB = None
+        EMB_UNIT = None
+        return False
 
 def top_k_by_embedding(query_text: str, k: int = 12):
     """正確な上位K (コサイン類似) を ~O(n) で取得する最適化版。
@@ -112,24 +159,255 @@ def top_k_by_embedding(query_text: str, k: int = 12):
       3. そのK件のみを降順ソート
     2000件程度では典型的に <2ms (M2) を目標。
     """
-    if k <= 0:
+    if k <= 0 or client is None:
         return []
-    k = min(k, EMB_UNIT.shape[0])
-    q_raw = client.models.embed_content(model=EMBEDDING_MODEL, contents=query_text).embeddings[0].values
-    q = np.array(q_raw, dtype=np.float32, copy=False)
-    q_norm = np.linalg.norm(q) + 1e-9
-    q_unit = q / q_norm
-    # 内積 (EMB_UNIT shape: [N,D]) @ (D,) -> (N,)
-    sims = EMB_UNIT @ q_unit  # float32
-    # 部分ソート: 上位K位置を抽出
-    if k == EMB_UNIT.shape[0]:
-        top_idx_unsorted = np.arange(k)
+    if not _ensure_embeddings():
+        return []
+    try:
+        k = min(k, EMB_UNIT.shape[0])
+        q_raw = client.models.embed_content(model=EMBEDDING_MODEL, contents=query_text).embeddings[0].values
+        q = np.array(q_raw, dtype=np.float32, copy=False)
+        q_unit = q / (np.linalg.norm(q) + 1e-9)
+        sims = EMB_UNIT @ q_unit
+        top_idx_unsorted = np.arange(k) if k == EMB_UNIT.shape[0] else np.argpartition(sims, -k)[-k:]
+        order = np.argsort(sims[top_idx_unsorted])[::-1]
+        idx_sorted = top_idx_unsorted[order]
+        return [ACTIVITIES[i] for i in idx_sorted]
+    except Exception as e:
+        app.logger.warning("embed query failed: %s", e.__class__.__name__)
+        return []
+
+def _generate_fallback_suggestions(weather, user_data, rule_tags, candidates):
+    """Gemini APIが利用できない場合のフォールバック提案生成"""
+    current = weather.get("current", {})
+    mood = user_data.get("mood", "").strip()
+    indoor = user_data.get("indoor")
+    budget = user_data.get("budget", "").strip()
+    radius_km = user_data.get("radius_km")
+    
+    # 天気情報の解析
+    temp = current.get("apparent_temperature", 20)
+    precip = current.get("precipitation", 0)
+    
+    # 基本的な提案を3つ生成
+    suggestions = []
+    
+    # 提案1: 天気と気分に基づく基本提案
+    if "まったり" in mood or "のんびり" in mood or "リラックス" in mood:
+        if indoor or precip > 0:
+            title = "室内でまったりプラン"
+            activities = ["カフェでコーヒータイム", "本屋で読書", "美術館・博物館巡り"]
+        else:
+            title = "屋外でまったりプラン" 
+            activities = ["公園でピクニック", "散歩コース探索", "オープンテラスカフェ"]
+    elif "冒険" in mood or "アクティブ" in mood or "運動" in mood:
+        if indoor or precip > 0:
+            title = "屋内アクティブプラン"
+            activities = ["ボルダリング", "トランポリン", "カラオケ"]
+        else:
+            title = "アウトドア冒険プラン"
+            activities = ["ハイキング", "サイクリング", "スポーツ施設"]
     else:
-        top_idx_unsorted = np.argpartition(sims, -k)[-k:]
-    # その範囲のみ降順並べ替え
-    order = np.argsort(sims[top_idx_unsorted])[::-1]
-    idx_sorted = top_idx_unsorted[order]
-    return [ACTIVITIES[i] for i in idx_sorted]
+        if indoor or precip > 0:
+            title = "室内エンジョイプラン"
+            activities = ["ショッピングモール", "映画館", "アミューズメント施設"]
+        else:
+            title = "お出かけプラン"
+            activities = ["観光スポット巡り", "地元グルメ探索", "季節のイベント"]
+    
+    # 天気に応じた調整
+    weather_note = ""
+    if precip > 0:
+        weather_note = "（雨天のため屋内中心）"
+    elif temp >= 30:
+        weather_note = "（暑いため涼しい場所中心）"
+        activities = [act.replace("屋外", "涼しい場所での") for act in activities]
+    elif temp <= 10:
+        weather_note = "（寒いため暖かい場所中心）"
+        activities = [act.replace("屋外", "暖かい場所での") for act in activities]
+    
+    activity_text = "、".join(activities[:3])
+    
+    # 移動時間・予算の目安
+    time_estimate = "2-4時間"
+    if radius_km and radius_km <= 3:
+        time_estimate = "1-3時間（近場中心）"
+    elif radius_km and radius_km >= 10:
+        time_estimate = "半日〜1日（広範囲）"
+    
+    budget_note = ""
+    if budget:
+        budget_note = f"\n予算目安: {budget}以内"
+    elif "まったり" in mood:
+        budget_note = "\n予算目安: 1000-3000円"
+    else:
+        budget_note = "\n予算目安: 2000-5000円"
+    
+    suggestion1 = f"""1. {title}{weather_note}
+{activity_text}
+所要時間: {time_estimate}{budget_note}
+"""
+    
+    # 提案2: 候補アクティビティベース
+    if candidates:
+        cand_names = [c.get("name", "活動") for c in candidates[:3]]
+        suggestion2 = f"""2. 人気スポット巡りプラン
+{", ".join(cand_names)}
+各スポット1-2時間ずつ楽しむ
+所要時間: 3-5時間{budget_note}
+"""
+    else:
+        # タグベースの提案
+        tag_activities = {
+            "cafe": "カフェホッピング",
+            "museum": "文化施設巡り", 
+            "cinema": "映画鑑賞",
+            "mall": "ショッピング",
+            "aquarium": "水族館",
+            "spa": "スパ・温泉",
+            "bookstore": "本屋巡り"
+        }
+        
+        tag_based = []
+        for tag in rule_tags[:3]:
+            if tag in tag_activities:
+                tag_based.append(tag_activities[tag])
+        
+        if tag_based:
+            suggestion2 = f"""2. おすすめ活動プラン
+{", ".join(tag_based)}
+天気や気分にぴったりの活動
+所要時間: 2-4時間{budget_note}
+"""
+        else:
+            suggestion2 = f"""2. 定番お出かけプラン
+地元の人気スポット巡り
+カフェ、ショップ、観光地を組み合わせ
+所要時間: 3-5時間{budget_note}
+"""
+    
+    # 提案3: 時間帯・天気特化プラン
+    import datetime
+    hour = datetime.datetime.now().hour
+    
+    if hour < 12:
+        time_plan = "朝活プラン"
+        time_activities = "朝食カフェ → 散歩 → 午前中の空いているスポット"
+    elif hour < 17:
+        time_plan = "午後満喫プラン" 
+        time_activities = "ランチ → メインアクティビティ → カフェタイム"
+    else:
+        time_plan = "夕方〜夜プラン"
+        time_activities = "夕食 → ナイトスポット → 夜景スポット"
+    
+    suggestion3 = f"""3. {time_plan}
+{time_activities}
+時間帯を活かした効率的なルート
+所要時間: 2-4時間{budget_note}
+"""
+    
+    # 近隣POI (suggest 内で user_data['_near_pois'] として渡される想定)
+    near_pois = user_data.get("_near_pois") or []
+    if near_pois:
+        suggestion4 = """4. 近場スポット候補
+{spots}
+半径内で見つかった場所（参考）""".format(spots=", ".join(near_pois[:6]))
+        return suggestion1 + "\n" + suggestion2 + "\n" + suggestion3 + "\n" + suggestion4
+    return suggestion1 + "\n" + suggestion2 + "\n" + suggestion3
+
+# ---------------- 近隣POI取得 (OpenStreetMap Overpass) ----------------
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+TAG_TO_OSM_FEATURES = {
+    "cafe": [("amenity", "cafe")],
+    "bookstore": [("shop", "books")],
+    "museum": [("tourism", "museum")],
+    "aquarium": [("tourism", "aquarium")],
+    "cinema": [("amenity", "cinema")],
+    "spa": [("leisure", "spa"), ("amenity", "spa")],
+    "mall": [("shop", "mall"), ("amenity", "marketplace")],
+    "boardgame": [("shop", "games")],
+    "arcade": [("amenity", "arcade")],
+    "bouldering": [("leisure", "climbing")],
+    "trampoline": [("leisure", "trampoline")],
+    "karaoke": [("amenity", "karaoke")],
+    "park": [("leisure", "park")],
+}
+
+def fetch_nearby_pois(lat: float, lon: float, radius_m: int, rule_tags, remaining_budget: float):
+    """Overpass API から近隣POI名 (最大8件) を取得。
+    - radius_m は 200〜5000 にクリップ。
+    - rule_tags から最大3カテゴリを抽出し複合クエリ。
+    - 残り時間が不足 / 失敗時は空配列。
+    - 10分キャッシュ。
+    """
+    import time
+    if remaining_budget <= 0:
+        return []
+    radius_m = int(min(max(radius_m, 200), 5000))
+    selected = []
+    for t in rule_tags:
+        if t in TAG_TO_OSM_FEATURES and t not in selected:
+            selected.append(t)
+        if len(selected) >= 3:
+            break
+    if not selected:
+        return []
+    key = (round(lat,3), round(lon,3), radius_m//1000, tuple(sorted(selected)))
+    cache = globals().setdefault("_POI_CACHE", {})
+    now = time.time()
+    cached = cache.get(key)
+    if cached and now - cached[0] < 600:
+        return cached[1]
+    parts = []
+    for tag in selected:
+        for k,v in TAG_TO_OSM_FEATURES[tag]:
+            parts.append(f"node[\"{k}\"=\"{v}\"](around:{radius_m},{lat},{lon});")
+    if not parts:
+        return []
+    query = "[out:json][timeout:8];(" + "".join(parts) + ");out qt 20;"
+    if remaining_budget < 1.0:
+        return []
+    timeout = 2.0 if remaining_budget >= 2.5 else max(0.5, remaining_budget*0.6)
+    try:
+        import requests as _rq
+        resp = _rq.post(OVERPASS_URL, data={"data": query}, timeout=timeout, headers={"User-Agent": "PlayPlan/0.1 (+github)"})
+        if resp.status_code != 200:
+            return []
+        js = resp.json()
+        names = []
+        for el in js.get("elements", []):
+            tg = el.get("tags") or {}
+            name = tg.get("name:ja") or tg.get("name")
+            if name and name not in names:
+                names.append(name)
+            if len(names) >= 8:
+                break
+        cache[key] = (time.time(), names)
+        return names
+    except Exception as e:
+        app.logger.debug("poi fetch failed: %s", e.__class__.__name__)
+        return []
+
+# ------------------------------------------------------------
+# フロントエンド配信: public/ 配下 (index.html + 静的資産)
+# ルート / と任意の非APIパスを SPA 的に index.html へフォールバック
+# ------------------------------------------------------------
+@app.route('/public/<path:filename>')
+def public_files(filename):
+    return send_from_directory('public', filename)
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def frontend(path: str):
+    # /api/ で始まるものはここでは扱わない
+    if path.startswith('api/'):
+        return jsonify({"error": "not_found"}), 404
+    # 直接ファイルが存在すれば返却
+    full_path = os.path.join('public', path)
+    if path and os.path.isfile(full_path):
+        return send_from_directory('public', path)
+    # 既定で index.html
+    return send_from_directory('public', 'index.html')
 
 @app.post("/api/suggest")
 def suggest():
@@ -144,18 +422,26 @@ def suggest():
     """
     import time, concurrent.futures, threading
 
+    # 詳細ログ追加（デバッグ用）
+    app.logger.info("=== /api/suggest REQUEST START ===")
+    app.logger.info("Method: %s", request.method)
+    app.logger.info("Content-Type: %s", request.content_type)
+    app.logger.info("Raw request data present: %s", bool(request.data))
+    
     start = time.time()
     global client
+    client_failed = False
     if client is None:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return jsonify({"error": "GEMINI_API_KEY not set"}), 500
-        try:
-            from google import genai as _g
-            # api_key を明示指定 (他の credential 方法と混同しない)
-            globals()['client'] = client = _g.Client(api_key=api_key)
-        except Exception as e:
-            return jsonify({"error": f"gemini client init failed: {e}"}), 500
+        if api_key:
+            try:
+                from google import genai as _g
+                globals()['client'] = client = _g.Client(api_key=api_key)
+            except Exception as e:
+                app.logger.warning("gemini init failed: %s", e.__class__.__name__)
+                client_failed = True
+        else:
+            client_failed = True
     BUDGET_SECONDS = 6.0
 
     # ---------- 入力バリデーション (Pydantic) ----------
@@ -205,19 +491,49 @@ def suggest():
     except Exception as e:
         return jsonify({"error": f"rule engine error: {e}"}), 500
 
+    # ---------- 近隣POI取得 (位置情報 + 半径利用) ----------
+    near_pois = []
+    if data.get("radius_km") and not os.environ.get("DISABLE_POI"):
+        remaining_for_poi = BUDGET_SECONDS - (time.time() - start)
+        try:
+            near_pois = fetch_nearby_pois(
+                lat, lon,
+                radius_m=int(data["radius_km"] * 1000),
+                rule_tags=rule_tags,
+                remaining_budget=remaining_for_poi,
+            ) or []
+            if near_pois:
+                data["_near_pois"] = near_pois
+        except Exception:
+            near_pois = []
+
     # ---------- Embedding検索候補 ----------
     if time.time() - start >= BUDGET_SECONDS:
         return jsonify({"error": "timeout before embedding"}), 504
     query = f"気分:{data.get('mood','')} タグ:{','.join(rule_tags)} 予算:{data.get('budget','未指定')}"
-    try:
-        candidates = top_k_by_embedding(query, k=8)
-    except Exception as e:
-        return jsonify({"error": f"embedding search failed: {e}"}), 500
+    candidates = []
+    if not client_failed:
+        candidates = top_k_by_embedding(query, k=8) or []
 
     # ---------- Gemini 生成 ----------
     remaining = BUDGET_SECONDS - (time.time() - start)
     if remaining <= 0:
-        return jsonify({"error": "timeout before generation"}), 504
+        # 生成を諦めフォールバック
+        elapsed = round(time.time() - start, 3)
+        fallback_suggestions = _generate_fallback_suggestions(weather, data, rule_tags, candidates)
+        response_data = {
+            "suggestions": fallback_suggestions,
+            "weather": weather.get("current", {}),
+            "tags": rule_tags,
+            "candidates": candidates,
+            "elapsed_sec": elapsed,
+            "fallback": True,
+            "fallback_reason": "timeout"
+        }
+        app.logger.info("=== /api/suggest TIMEOUT FALLBACK ===")
+        app.logger.info("Response status: 200")
+        app.logger.info("Elapsed: %ss", elapsed)
+        return jsonify(response_data)
 
     prompt = f"""
 あなたは当日のレジャーコンシェルジュです。以下の条件で、実行可能性が高く多様性のある3案を日本語で提案してください。各案は:
@@ -240,39 +556,63 @@ def suggest():
 {json.dumps(candidates, ensure_ascii=False)}
 """.strip()
 
-    def _gen():
-        return client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            ),
-        )
+    suggestions_text = None
+    if not client_failed and client is not None:
+        def _gen():
+            return client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                ),
+            )
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(_gen)
+                resp = fut.result(timeout=remaining)
+            suggestions_text = (getattr(resp, "text", None) or "").strip() or None
+        except Exception as e:
+            app.logger.warning("generation failed: %s", e.__class__.__name__)
 
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_gen)
-            resp = fut.result(timeout=remaining)
-    except concurrent.futures.TimeoutError:
-        return jsonify({"error": "generation_timeout"}), 504
-    except Exception as e:
-        app.logger.warning("generation failure: %s", e.__class__.__name__)
-        return jsonify({"error": "generation_failed"}), 502
-
-    suggestions_text = getattr(resp, "text", None) or "".strip()
     if not suggestions_text:
-        return jsonify({"error": "empty_generation"}), 502
+        # フォールバック: より実用的な提案を生成
+        elapsed = round(time.time() - start, 3)
+        fallback_suggestions = _generate_fallback_suggestions(weather, data, rule_tags, candidates)
+        response_data = {
+            "suggestions": fallback_suggestions,
+            "weather": weather.get("current", {}),
+            "tags": rule_tags,
+            "candidates": candidates,
+            "near_pois": near_pois,
+            "elapsed_sec": elapsed,
+            "fallback": True,
+        }
+        app.logger.info("=== /api/suggest FALLBACK ===")
+        app.logger.info("Response status: 200")
+        app.logger.info("Elapsed: %ss", elapsed)
+        return jsonify(response_data)
 
     elapsed = round(time.time() - start, 3)
-    return jsonify({
+    response_data = {
         "suggestions": suggestions_text,
         "weather": weather.get("current", {}),
         "tags": rule_tags,
         "candidates": candidates,
+        "near_pois": near_pois,
         "elapsed_sec": elapsed,
-    })
+        "fallback": False,
+    }
+    app.logger.info("=== /api/suggest SUCCESS ===")
+    app.logger.info("Response status: 200")
+    app.logger.info("Elapsed: %ss", elapsed)
+    return jsonify(response_data)
 
 if __name__ == "__main__":
+    # ログレベルを設定（デバッグ用）
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    app.logger.setLevel(logging.INFO)
+    
     # 環境変数 PORT があれば利用
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)

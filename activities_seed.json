@@ -1,1 +1,27 @@
-[{"name": "Dummy Activity", "tags": ["sample"]}, {"name": "Another", "tags": ["sample2"]}]
+[
+  {"name": "地元カフェ巡り", "tags": ["cafe", "indoor", "relaxing"]},
+  {"name": "美術館・博物館", "tags": ["museum", "indoor", "cultural"]},
+  {"name": "映画館", "tags": ["cinema", "indoor", "entertainment"]},
+  {"name": "ショッピングモール", "tags": ["mall", "indoor", "shopping"]},
+  {"name": "水族館", "tags": ["aquarium", "indoor", "family"]},
+  {"name": "温泉・スパ", "tags": ["spa", "indoor", "relaxing"]},
+  {"name": "本屋・書店", "tags": ["bookstore", "indoor", "relaxing"]},
+  {"name": "ボルダリング", "tags": ["bouldering", "indoor", "active"]},
+  {"name": "トランポリン", "tags": ["trampoline", "indoor", "active"]},
+  {"name": "カラオケ", "tags": ["karaoke", "indoor", "entertainment"]},
+  {"name": "アーケードゲーム", "tags": ["arcade", "indoor", "entertainment"]},
+  {"name": "ボードゲームカフェ", "tags": ["boardgame", "indoor", "social"]},
+  {"name": "公園散歩", "tags": ["park", "outdoor", "relaxing"]},
+  {"name": "ハイキング", "tags": ["hiking", "outdoor", "active"]},
+  {"name": "サイクリング", "tags": ["cycling", "outdoor", "active"]},
+  {"name": "ピクニック", "tags": ["picnic", "outdoor", "relaxing"]},
+  {"name": "観光スポット巡り", "tags": ["sightseeing", "outdoor", "cultural"]},
+  {"name": "地元グルメ探索", "tags": ["food", "outdoor", "culinary"]},
+  {"name": "季節のイベント", "tags": ["event", "outdoor", "seasonal"]},
+  {"name": "フリーマーケット", "tags": ["market", "outdoor", "shopping"]},
+  {"name": "コワーキングスペース", "tags": ["workspace", "indoor", "productive"]},
+  {"name": "プラネタリウム", "tags": ["planetarium", "indoor", "educational"]},
+  {"name": "陶芸体験", "tags": ["pottery", "indoor", "creative"]},
+  {"name": "料理教室", "tags": ["cooking", "indoor", "learning"]},
+  {"name": "フィットネスジム", "tags": ["gym", "indoor", "active"]}
+]

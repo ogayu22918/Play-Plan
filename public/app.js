@@ -114,7 +114,13 @@
     }).then(function(json){
       var text = json.suggestions || '';
       renderSuggestions(text);
-      if(json.fallback){ showToast('フォールバック応答 ('+(json.weather_error||'')+')', false); }
+      if(json.fallback){ 
+        var reason = json.fallback_reason;
+        var msg = 'AI生成ができないため、基本的な提案をお送りしました';
+        if(reason === 'timeout') msg = '処理時間の制限により、基本的な提案をお送りしました';
+        if(json.weather_error) msg += ' (天気データ取得エラー: ' + json.weather_error + ')';
+        showToast(msg, false); 
+      }
     }).catch(function(e){
       clearCards();
       showToast('取得失敗: '+ e.message, true);
